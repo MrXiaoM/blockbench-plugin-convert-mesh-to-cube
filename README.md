@@ -18,7 +18,12 @@ BlockBench plugin that helps you convert `mesh` back to `cube`.
    - 右键 → Convert to Cube / Right click → Convert to Cube
    - 或者 / Or: Mesh 菜单 → Convert to Cube
 
-3. **重新加载插件 / Reload Plugin** (更新后 / After updates)
+3. **移除未使用纹理 / Remove Unused Textures**
+   - 打开 工具 / Tools 菜单
+   - 点击 `移除未使用纹理` / Click `Remove Unused Textures`
+   - 插件会删除当前模型中未被任何元素面使用的纹理 / The plugin removes textures not used by any element face in the current model
+ 
+4. **重新加载插件 / Reload Plugin** (更新后 / After updates)
    - 卸载旧版本 / Uninstall old version: File → Plugins → "Convert Mesh to Cube" → Uninstall
    - 重新加载 / Reload: File → Plugins → Load Plugin from File
 

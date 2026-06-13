@@ -7,6 +7,7 @@
  */
 
 let convert_button;
+let remove_unused_textures_button;
 
 Plugin.register('convert_mesh_to_cube', {
     title: 'Convert Mesh to Cube',
@@ -20,12 +21,35 @@ Plugin.register('convert_mesh_to_cube', {
         Language.addTranslations('en', {
             "action.convert_mesh_to_cube": "Convert to Cube",
             "action.convert_mesh_to_cube.desc": "Convert the selected elements into cubes",
+            "action.remove_unused_textures": "Remove Unused Textures",
+            "action.remove_unused_textures.desc": "Remove all textures that are not used by the current model",
         });
         Language.addTranslations('zh', {
             "action.convert_mesh_to_cube": "转换成块",
             "action.convert_mesh_to_cube.desc": "转换使选中的元素成块",
+            "action.remove_unused_textures": "移除未使用纹理",
+            "action.remove_unused_textures.desc": "移除当前模型未被使用的所有纹理",
         });
 
+        function collectUsedTextureIds() {
+            const usedTextureIds = new Set();
+            Outliner.elements.forEach(element => {
+                if (!element.faces) return;
+                Object.values(element.faces).forEach(face => {
+                    if (!face || !face.texture || face.texture === null) return;
+                    usedTextureIds.add(face.texture);
+                });
+            });
+            return usedTextureIds;
+        }
+
+        function isTextureUsed(texture, usedTextureIds) {
+            return usedTextureIds.has(texture.uuid)
+                || usedTextureIds.has(texture.id)
+                || usedTextureIds.has(`#${texture.id}`)
+                || usedTextureIds.has(texture);
+        }
+ 
         convert_button = new Action('convert_mesh_to_cube', {
             icon: 'fa-cube',
             category: 'edit',
@@ -186,13 +210,34 @@ Plugin.register('convert_mesh_to_cube', {
             }
         });
 
+        remove_unused_textures_button = new Action('remove_unused_textures', {
+            icon: 'fa-trash',
+            category: 'tools',
+            condition: () => (Texture.all && Texture.all.length > 0),
+            click() {
+                const usedTextureIds = collectUsedTextureIds();
+                const unusedTextures = Texture.all.filter(texture => !isTextureUsed(texture, usedTextureIds));
+                if (!unusedTextures.length) {
+                    Blockbench.showQuickMessage('没有可移除的未使用纹理');
+                    return;
+                }
+
+                Undo.initEdit({ textures: [...unusedTextures] });
+                unusedTextures.forEach(texture => texture.remove());
+                Undo.finishEdit('Remove unused textures');
+                Blockbench.showQuickMessage(`已移除 ${unusedTextures.length} 个未使用纹理`);
+            }
+        });
+ 
         // 添加到菜单 / Add to menu
         MenuBar.addAction(convert_button, 'mesh');
+        MenuBar.addAction(remove_unused_textures_button, 'tools');
         var meshMenu = Mesh.prototype.menu.structure;
         var index = meshMenu.indexOf("apply_mesh_rotation");
         meshMenu.splice(index + 1, 0, convert_button.id);
     },
     onunload() {
         convert_button.delete();
+        remove_unused_textures_button.delete();
     }
 });
