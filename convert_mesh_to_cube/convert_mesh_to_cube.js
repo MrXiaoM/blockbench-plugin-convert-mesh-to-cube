@@ -10,11 +10,11 @@ let convert_button;
 
 Plugin.register('convert_mesh_to_cube', {
     title: 'Convert Mesh to Cube',
-    author: 'MrXiaoM (V8)',
+    author: 'MrXiaoM (V9)',
     icon: 'fa-cube',
-    description: 'Convert mesh back to cube - uses largest triangle pair UV.',
+    description: 'Convert mesh back to cube - preserves transformed placement and largest triangle pair UV.',
     tags: ['Mesh', 'Cube', 'Tool'],
-    version: '8.0.0',
+    version: '9.0.0',
     variant: 'both',
     onload() {
         Language.addTranslations('en', {
@@ -33,12 +33,9 @@ Plugin.register('convert_mesh_to_cube', {
             click() {
                 Undo.initEdit({ elements: [...Mesh.selected], outliner: true });
 
-                // 浮点数比较的误差范围 / Epsilon for floating point comparison
                 const EPSILON = 1e-4;
                 function approxEqual(a, b) { return Math.abs(a - b) < EPSILON; }
-                
-                // 计算三角形在 3D 空间中的面积（使用叉积）
-                // Calculate triangle area in 3D space using cross product
+                function normalizeBounds(value) { return Math.abs(value) < EPSILON ? 0 : value; }
                 function triangleArea3D(p1, p2, p3) {
                     const ax = p2[0] - p1[0], ay = p2[1] - p1[1], az = p2[2] - p1[2];
                     const bx = p3[0] - p1[0], by = p3[1] - p1[1], bz = p3[2] - p1[2];
@@ -49,22 +46,29 @@ Plugin.register('convert_mesh_to_cube', {
                 }
 
                 let new_cubes = [];
+                const selected_meshes = [...Mesh.selected];
 
-                Mesh.selected.forEach(mesh => {
-                    // 计算网格的边界框（AABB）/ Calculate mesh bounding box (AABB)
-                    let verticesCoords = Object.values(mesh.vertices);
+                selected_meshes.forEach(mesh => {
+                    const localVertices = Object.values(mesh.vertices);
+                    if (!localVertices.length) return;
+
                     let minX = Infinity, maxX = -Infinity;
                     let minY = Infinity, maxY = -Infinity;
                     let minZ = Infinity, maxZ = -Infinity;
 
-                    verticesCoords.forEach(coord => {
+                    localVertices.forEach(coord => {
                         minX = Math.min(minX, coord[0]); maxX = Math.max(maxX, coord[0]);
                         minY = Math.min(minY, coord[1]); maxY = Math.max(maxY, coord[1]);
                         minZ = Math.min(minZ, coord[2]); maxZ = Math.max(maxZ, coord[2]);
                     });
 
-                    // 定义六个面的检测器：检查顶点是否都在某个平面上
-                    // Define detectors for 6 faces: check if vertices are all on a plane
+                    minX = normalizeBounds(minX);
+                    maxX = normalizeBounds(maxX);
+                    minY = normalizeBounds(minY);
+                    maxY = normalizeBounds(maxY);
+                    minZ = normalizeBounds(minZ);
+                    maxZ = normalizeBounds(maxZ);
+
                     const faceDetectors = {
                         east: (coords) => coords.every(c => approxEqual(c[0], maxX)),
                         west: (coords) => coords.every(c => approxEqual(c[0], minX)),
@@ -74,22 +78,18 @@ Plugin.register('convert_mesh_to_cube', {
                         north: (coords) => coords.every(c => approxEqual(c[2], minZ))
                     };
 
-                    // 存储每个面的所有三角形 / Store all triangles for each face
                     const faceTriangles = {
                         north: [], south: [], east: [], west: [], up: [], down: []
                     };
 
-                    // 遍历网格的所有面，按方向分类三角形
-                    // Iterate through all mesh faces and classify triangles by direction
                     mesh.forAllFaces((face) => {
                         const faceVkeys = face.vertices;
                         const uniqueVkeys = [...new Set(faceVkeys)];
                         if (uniqueVkeys.length < 3) return;
-                        
-                        const faceCoords = uniqueVkeys.map(vkey => mesh.vertices[vkey]).filter(c => c);
+
+                        const faceCoords = uniqueVkeys.map(vkey => mesh.vertices[vkey]).filter(coord => coord);
                         if (faceCoords.length < 3) return;
 
-                        // 检测这个三角形属于哪个方向 / Detect which direction this triangle belongs to
                         let direction = null;
                         for (const [dir, detector] of Object.entries(faceDetectors)) {
                             if (detector(faceCoords)) {
@@ -99,11 +99,7 @@ Plugin.register('convert_mesh_to_cube', {
                         }
                         if (!direction) return;
 
-                        // 计算三角形面积，过滤退化三角形 / Calculate triangle area, filter degenerate triangles
                         const area = triangleArea3D(faceCoords[0], faceCoords[1], faceCoords[2]);
-                        
-                        // 收集 UV 坐标（只保留面积 > 0 的三角形）
-                        // Collect UV coordinates (only keep triangles with area > 0)
                         if (face.uv && area > EPSILON) {
                             const triangleUVs = [];
                             uniqueVkeys.forEach(vkey => {
@@ -111,7 +107,7 @@ Plugin.register('convert_mesh_to_cube', {
                                     triangleUVs.push(face.uv[vkey].slice());
                                 }
                             });
-                            
+
                             if (triangleUVs.length >= 3) {
                                 faceTriangles[direction].push({
                                     uvs: triangleUVs,
@@ -122,30 +118,16 @@ Plugin.register('convert_mesh_to_cube', {
                         }
                     });
 
-                    // 为每个方向计算最终的 UV 和纹理
-                    // Compute final UV and texture for each direction
                     const computedFaces = {};
-                    
                     for (const [direction, triangles] of Object.entries(faceTriangles)) {
                         if (triangles.length === 0) {
-                            // 没有三角形，使用默认 UV / No triangles, use default UV
-                            computedFaces[direction] = {
-                                uv: [0, 0, 16, 16],
-                                texture: null,
-                                rotation: 0
-                            };
+                            computedFaces[direction] = { uv: [0, 0, 16, 16], texture: null, rotation: 0 };
                             continue;
                         }
 
-                        // 按面积降序排序，选择最大的三角形（避免使用退化三角形的 UV）
-                        // Sort by area descending, select largest triangles (avoid using degenerate triangle UVs)
                         triangles.sort((a, b) => b.area - a.area);
-                        
                         let bestUVs = [];
                         let bestTexture = null;
-                        
-                        // 取最多 2 个最大的三角形（一个 cube 面通常由 2 个三角形组成）
-                        // Take up to 2 largest triangles (a cube face is usually composed of 2 triangles)
                         const maxTriangles = Math.min(triangles.length, 2);
                         for (let i = 0; i < maxTriangles; i++) {
                             bestUVs.push(...triangles[i].uvs);
@@ -153,102 +135,52 @@ Plugin.register('convert_mesh_to_cube', {
                         }
 
                         if (bestUVs.length >= 3) {
-                            // 计算 UV 边界框 / Calculate UV bounding box
-                            const uValues = bestUVs.map(p => p[0]);
-                            const vValues = bestUVs.map(p => p[1]);
-                            
+                            const uValues = bestUVs.map(point => point[0]);
+                            const vValues = bestUVs.map(point => point[1]);
                             const minU = Math.min(...uValues);
                             const maxU = Math.max(...uValues);
                             const minV = Math.min(...vValues);
                             const maxV = Math.max(...vValues);
 
-                            // 根据面的方向调整 UV 坐标顺序
-                            // Adjust UV coordinate order based on face direction
-                            let uv;
-                            switch (direction) {
-                                case 'north':
-                                case 'south':
-                                case 'east':
-                                case 'west':
-                                    uv = [minU, maxV, maxU, minV];
-                                    break;
-                                case 'up':
-                                case 'down':
-                                    uv = [minU, minV, maxU, maxV];
-                                    break;
-                                default:
-                                    uv = [minU, minV, maxU, maxV];
-                            }
-
                             computedFaces[direction] = {
-                                uv: uv,
+                                uv: (direction === 'up' || direction === 'down')
+                                    ? [minU, minV, maxU, maxV]
+                                    : [minU, maxV, maxU, minV],
                                 texture: bestTexture,
                                 rotation: 0
                             };
                         } else {
-                            computedFaces[direction] = {
-                                uv: [0, 0, 16, 16],
-                                texture: bestTexture,
-                                rotation: 0
-                            };
+                            computedFaces[direction] = { uv: [0, 0, 16, 16], texture: bestTexture, rotation: 0 };
                         }
                     }
 
-                    // 创建新的 Cube 元素（禁用 box_uv 和 autouv 以使用精确 UV）
-                    // Create new Cube element (disable box_uv and autouv to use precise UV)
-                    let cube = new Cube({
+                    const cube = new Cube({
                         name: mesh.name,
                         color: mesh.color,
-                        origin: mesh.origin.slice(),
-                        rotation: mesh.rotation.slice(),
-                        box_uv: false,  // 禁用 box UV 模式 / Disable box UV mode
-                        autouv: 0,      // 禁用自动 UV / Disable auto UV
+                        origin: mesh.origin ? mesh.origin.slice() : [0, 0, 0],
+                        rotation: mesh.rotation ? mesh.rotation.slice() : [0, 0, 0],
+                        box_uv: false,
+                        autouv: 0,
                         from: [minX + mesh.origin[0], minY + mesh.origin[1], minZ + mesh.origin[2]],
                         to: [maxX + mesh.origin[0], maxY + mesh.origin[1], maxZ + mesh.origin[2]],
                         faces: {
-                            north: { 
-                                uv: computedFaces.north.uv, 
-                                texture: computedFaces.north.texture,
-                                rotation: 0
-                            },
-                            south: { 
-                                uv: computedFaces.south.uv, 
-                                texture: computedFaces.south.texture,
-                                rotation: 0
-                            },
-                            east: { 
-                                uv: computedFaces.east.uv, 
-                                texture: computedFaces.east.texture,
-                                rotation: 0
-                            },
-                            west: { 
-                                uv: computedFaces.west.uv, 
-                                texture: computedFaces.west.texture,
-                                rotation: 0
-                            },
-                            up: { 
-                                uv: computedFaces.up.uv, 
-                                texture: computedFaces.up.texture,
-                                rotation: 0
-                            },
-                            down: { 
-                                uv: computedFaces.down.uv, 
-                                texture: computedFaces.down.texture,
-                                rotation: 0
-                            }
+                            north: { uv: computedFaces.north.uv, texture: computedFaces.north.texture, rotation: 0 },
+                            south: { uv: computedFaces.south.uv, texture: computedFaces.south.texture, rotation: 0 },
+                            east: { uv: computedFaces.east.uv, texture: computedFaces.east.texture, rotation: 0 },
+                            west: { uv: computedFaces.west.uv, texture: computedFaces.west.texture, rotation: 0 },
+                            up: { uv: computedFaces.up.uv, texture: computedFaces.up.texture, rotation: 0 },
+                            down: { uv: computedFaces.down.uv, texture: computedFaces.down.texture, rotation: 0 }
                         }
                     });
 
-                    // 插入到原 mesh 位置，并移除原 mesh / Insert at original mesh position and remove mesh
                     cube.sortInBefore(mesh).init();
                     new_cubes.push(cube);
                     selected.push(cube);
                     mesh.remove();
                 });
 
-                // 完成撤销操作并更新视图 / Finish undo operation and update view
                 Undo.finishEdit('Convert elements to cubes', { elements: new_cubes, outliner: true });
-                Canvas.updateView({ elements: Mesh.selected, element_aspects: { geometry: true, transform: true }, selection: true });
+                Canvas.updateView({ elements: selected_meshes, element_aspects: { geometry: true, transform: true }, selection: true });
                 Canvas.updateView({ elements: new_cubes, element_aspects: { geometry: true, transform: true }, selection: true });
                 updateSelection();
             }
