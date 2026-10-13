@@ -1,5 +1,5 @@
 /**
- * Convert Mesh to Cube - V8
+ * Convert Mesh to Cube - V10
  * 
  * 核心策略：找到每个方向上面积最大的三角形对，使用它们的 UV
  * 因为原始 mesh 的一个面可能由多个三角形组成，映射到纹理的不同区域
@@ -11,11 +11,11 @@ let remove_unused_textures_button;
 
 Plugin.register('convert_mesh_to_cube', {
     title: 'Convert Mesh to Cube',
-    author: 'MrXiaoM (V9)',
+    author: 'MrXiaoM (V10)', //b919 fix not adding myself in credits that's original author desition
     icon: 'fa-cube',
     description: 'Convert mesh back to cube - preserves transformed placement and largest triangle pair UV.',
     tags: ['Mesh', 'Cube', 'Tool'],
-    version: '9.0.0',
+    version: '10.0.0',
     variant: 'both',
     onload() {
         Language.addTranslations('en', {
@@ -102,18 +102,42 @@ Plugin.register('convert_mesh_to_cube', {
                         north: (coords) => coords.every(c => approxEqual(c[2], minZ))
                     };
 
-                    const faceTriangles = {
-                        north: [], south: [], east: [], west: [], up: [], down: []
+                    // Corner positions indexed exactly like vertex_keys in Blockbench's
+                    // Cube -> Mesh conversion (mesh_editing.js convert_to_mesh).
+                    const vertexKeysPos = [
+                        [maxX, maxY, maxZ],
+                        [maxX, maxY, minZ],
+                        [maxX, minY, maxZ],
+                        [maxX, minY, minZ],
+                        [minX, maxY, maxZ],
+                        [minX, maxY, minZ],
+                        [minX, minY, maxZ],
+                        [minX, minY, minZ]
+                    ];
+                    // Per-direction vertex order passed to addFace in convert_to_mesh.
+                    const convertOrder = {
+                        east: [1, 0, 3, 2],
+                        west: [4, 5, 6, 7],
+                        up: [1, 5, 0, 4],
+                        down: [2, 6, 3, 7],
+                        south: [0, 4, 2, 6],
+                        north: [5, 1, 7, 3]
+                    };
+
+                    const faceData = {
+                        north: null, south: null, east: null, west: null, up: null, down: null
                     };
 
                     mesh.forAllFaces((face) => {
-                        const faceVkeys = face.vertices;
-                        const uniqueVkeys = [...new Set(faceVkeys)];
+                        const uniqueVkeys = [...new Set(face.vertices)];
                         if (uniqueVkeys.length < 3) return;
 
-                        const faceCoords = uniqueVkeys.map(vkey => mesh.vertices[vkey]).filter(coord => coord);
-                        if (faceCoords.length < 3) return;
+                        const entries = uniqueVkeys
+                            .filter(vkey => mesh.vertices[vkey] && face.uv && face.uv[vkey])
+                            .map(vkey => ({ coord: mesh.vertices[vkey], uv: face.uv[vkey].slice() }));
+                        if (entries.length < 3) return;
 
+                        const faceCoords = entries.map(entry => entry.coord);
                         let direction = null;
                         for (const [dir, detector] of Object.entries(faceDetectors)) {
                             if (detector(faceCoords)) {
@@ -124,76 +148,101 @@ Plugin.register('convert_mesh_to_cube', {
                         if (!direction) return;
 
                         const area = triangleArea3D(faceCoords[0], faceCoords[1], faceCoords[2]);
-                        if (face.uv && area > EPSILON) {
-                            const triangleUVs = [];
-                            uniqueVkeys.forEach(vkey => {
-                                if (face.uv[vkey]) {
-                                    triangleUVs.push(face.uv[vkey].slice());
-                                }
-                            });
+                        if (area <= EPSILON) return;
 
-                            if (triangleUVs.length >= 3) {
-                                faceTriangles[direction].push({
-                                    uvs: triangleUVs,
-                                    texture: face.texture,
-                                    area: area
-                                });
-                            }
+                        const current = faceData[direction];
+                        if (!current || area > current.area) {
+                            faceData[direction] = { entries, texture: face.texture, area };
                         }
                     });
 
+                    function matchEntryUV(entries, target) {
+                        for (const entry of entries) {
+                            if (approxEqual(entry.coord[0], target[0])
+                                && approxEqual(entry.coord[1], target[1])
+                                && approxEqual(entry.coord[2], target[2])) {
+                                return entry.uv;
+                            }
+                        }
+                        return null;
+                    }
+
+                    // Inverts Blockbench's Cube -> Mesh UV assignment (mesh_editing.js addFace),
+                    // recovering the cube face rect [u1, v1, u2, v2] and its rotation so that
+                    // re-running "Convert to Mesh" reproduces the same per-vertex UVs.
+                    function solveFaceUV(direction, entries) {
+                        const corners = convertOrder[direction].map(index => vertexKeysPos[index]);
+                        const R = [
+                            matchEntryUV(entries, corners[1]),
+                            matchEntryUV(entries, corners[0]),
+                            matchEntryUV(entries, corners[2]),
+                            matchEntryUV(entries, corners[3])
+                        ];
+                        if (R.some(uv => !uv)) return null;
+
+                        if (approxEqual(R[1][1], R[0][1]) && approxEqual(R[2][0], R[1][0]) && approxEqual(R[3][0], R[0][0]) && approxEqual(R[3][1], R[2][1])) {
+                            return { uv: [R[0][0], R[0][1], R[1][0], R[2][1]], rotation: 0 };
+                        }
+                        if (approxEqual(R[0][0], R[1][0]) && approxEqual(R[2][1], R[1][1]) && approxEqual(R[3][0], R[2][0]) && approxEqual(R[3][1], R[0][1])) {
+                            return { uv: [R[1][0], R[1][1], R[2][0], R[0][1]], rotation: 90 };
+                        }
+                        if (approxEqual(R[0][1], R[1][1]) && approxEqual(R[1][0], R[2][0]) && approxEqual(R[3][0], R[0][0]) && approxEqual(R[3][1], R[2][1])) {
+                            return { uv: [R[2][0], R[2][1], R[0][0], R[0][1]], rotation: 180 };
+                        }
+                        if (approxEqual(R[1][1], R[2][1]) && approxEqual(R[0][0], R[1][0]) && approxEqual(R[3][0], R[2][0]) && approxEqual(R[3][1], R[0][1])) {
+                            return { uv: [R[3][0], R[3][1], R[0][0], R[1][1]], rotation: 270 };
+                        }
+                        return null;
+                    }
+
                     const computedFaces = {};
-                    for (const [direction, triangles] of Object.entries(faceTriangles)) {
-                        if (triangles.length === 0) {
+                    for (const [direction, data] of Object.entries(faceData)) {
+                        if (!data) {
                             computedFaces[direction] = { uv: [0, 0, 16, 16], texture: null, rotation: 0 };
                             continue;
                         }
 
-                        triangles.sort((a, b) => b.area - a.area);
-                        let bestUVs = [];
-                        let bestTexture = null;
-                        const maxTriangles = Math.min(triangles.length, 2);
-                        for (let i = 0; i < maxTriangles; i++) {
-                            bestUVs.push(...triangles[i].uvs);
-                            if (!bestTexture) bestTexture = triangles[i].texture;
-                        }
-
-                        if (bestUVs.length >= 3) {
-                            const uValues = bestUVs.map(point => point[0]);
-                            const vValues = bestUVs.map(point => point[1]);
-                            const minU = Math.min(...uValues);
-                            const maxU = Math.max(...uValues);
-                            const minV = Math.min(...vValues);
-                            const maxV = Math.max(...vValues);
-
+                        const solved = solveFaceUV(direction, data.entries);
+                        if (solved) {
+                            computedFaces[direction] = { uv: solved.uv, texture: data.texture, rotation: solved.rotation };
+                        } else {
+                            const uValues = data.entries.map(entry => entry.uv[0]);
+                            const vValues = data.entries.map(entry => entry.uv[1]);
                             computedFaces[direction] = {
-                                uv: (direction === 'up' || direction === 'down')
-                                    ? [minU, minV, maxU, maxV]
-                                    : [minU, maxV, maxU, minV],
-                                texture: bestTexture,
+                                uv: [Math.min(...uValues), Math.min(...vValues), Math.max(...uValues), Math.max(...vValues)],
+                                texture: data.texture,
                                 rotation: 0
                             };
-                        } else {
-                            computedFaces[direction] = { uv: [0, 0, 16, 16], texture: bestTexture, rotation: 0 };
                         }
+                    }
+
+                    // Mesh rotation is stored in the THREE default 'XYZ' order (Blockbench's
+                    // Cube -> Mesh conversion reorders Format.euler_order to 'XYZ'). Cubes render
+                    // with Format.euler_order, so reorder back to preserve the visual orientation.
+                    // This is the inverse of mesh_editing.js convert_to_mesh (lines 545-547).
+                    let cube_rotation = [0, 0, 0];
+                    if (mesh.rotation) {
+                        const rotation_euler = new THREE.Euler(0, 0, 0, 'XYZ').fromArray(mesh.rotation.map(Math.degToRad));
+                        rotation_euler.reorder(Format.euler_order || 'ZYX');
+                        cube_rotation = rotation_euler.toArray().map(r => Math.roundTo(Math.radToDeg(r), 4));
                     }
 
                     const cube = new Cube({
                         name: mesh.name,
                         color: mesh.color,
                         origin: mesh.origin ? mesh.origin.slice() : [0, 0, 0],
-                        rotation: mesh.rotation ? mesh.rotation.slice() : [0, 0, 0],
+                        rotation: cube_rotation,
                         box_uv: false,
                         autouv: 0,
                         from: [minX + mesh.origin[0], minY + mesh.origin[1], minZ + mesh.origin[2]],
                         to: [maxX + mesh.origin[0], maxY + mesh.origin[1], maxZ + mesh.origin[2]],
                         faces: {
-                            north: { uv: computedFaces.north.uv, texture: computedFaces.north.texture, rotation: 0 },
-                            south: { uv: computedFaces.south.uv, texture: computedFaces.south.texture, rotation: 0 },
-                            east: { uv: computedFaces.east.uv, texture: computedFaces.east.texture, rotation: 0 },
-                            west: { uv: computedFaces.west.uv, texture: computedFaces.west.texture, rotation: 0 },
-                            up: { uv: computedFaces.up.uv, texture: computedFaces.up.texture, rotation: 0 },
-                            down: { uv: computedFaces.down.uv, texture: computedFaces.down.texture, rotation: 0 }
+                            north: { uv: computedFaces.north.uv, texture: computedFaces.north.texture, rotation: computedFaces.north.rotation },
+                            south: { uv: computedFaces.south.uv, texture: computedFaces.south.texture, rotation: computedFaces.south.rotation },
+                            east: { uv: computedFaces.east.uv, texture: computedFaces.east.texture, rotation: computedFaces.east.rotation },
+                            west: { uv: computedFaces.west.uv, texture: computedFaces.west.texture, rotation: computedFaces.west.rotation },
+                            up: { uv: computedFaces.up.uv, texture: computedFaces.up.texture, rotation: computedFaces.up.rotation },
+                            down: { uv: computedFaces.down.uv, texture: computedFaces.down.texture, rotation: computedFaces.down.rotation }
                         }
                     });
 
